@@ -919,7 +919,8 @@ class Elasticsearch {
 				 */
 				$request = apply_filters( 'ep_do_intercept_request', new WP_Error( 400, 'No Request defined' ), $query, $args, $failures );
 			} else {
-				$request = wp_remote_request( $query['url'], $args ); // try the existing host to avoid unnecessary calls.
+				$filtered_request = self::p4_filter_ep_request( $query, $args );
+				$request = wp_remote_request( $filtered_request['url'], $filtered_request['args'] ); // try the existing host to avoid unnecessary calls.
 			}
 
 			$request_response_code = (int) wp_remote_retrieve_response_code( $request );
@@ -1287,5 +1288,52 @@ class Elasticsearch {
 		do_action( 'ep_add_query_log', $query );
 	}
 
+	/**
+	 * PLANET 4 - Adding a filter to avoid some MIME types from being indexed on bulk requests.
+	 *
+	 * @param {array} $query Query to filter
+	 * @param {array} $args Request arguments
+	 */
+	public static function p4_filter_ep_request( $query = null, $args = null ) {
+		$filtered_body_lines = [];
+
+		// Is this a bulk index task on the attachment pipeline?
+		if ($query && !!preg_match('/_bulk\?pipeline.*attachment/', $query['url'])) {
+			$body_lines = explode("\n", $args['body']);
+			for($i = 0; $i < count($body_lines); $i += 3) {
+
+				// e.g.: { index; ... }
+				$index_header = $body_lines[$i];
+				if (isset($body_lines[$i + 1])) {
+					$index_content = $body_lines[$i + 1];
+
+					$index_content_data = json_decode($index_content, true);
+
+					// Not an attachment (no MIME type)
+					if ($index_content_data['post_type'] != 'attachment') {
+						$filtered_body_lines[] = $index_header;
+						$filtered_body_lines[] = $index_content;
+						$filtered_body_lines[] = "";
+					} elseif (
+							!empty($index_content_data['post_mime_type']) &&
+							in_array($index_content_data['post_mime_type'], [
+								'application/pdf',
+							])
+						) {
+						$filtered_body_lines[] = $index_header;
+						$filtered_body_lines[] = $index_content;
+						$filtered_body_lines[] = ""; // The third element ($body_lines[$i + 2]) is just an empty string.
+					}
+				}
+			}
+
+			$args['body'] = implode("\n", $filtered_body_lines);
+		}
+
+		return [
+			'url' => $query['url'],
+			'args' => $args
+		];
+	}
 }
 
